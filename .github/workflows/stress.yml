@@ -1,0 +1,42 @@
+name: rAJIT stress (flakiness check)
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  stress:
+    name: Repeat suite ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [interpreter, default, forced-compile]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(cat .github/linux-dependencies.txt)
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rajit-test
+      - name: Build tests
+        run: cargo test -p tests --test tests --profile ci --no-run
+      - name: Run the suite 6 times
+        run: |
+          case "${{ matrix.mode }}" in
+            interpreter)    export RAJIT_DISABLE=1 ;;
+            forced-compile) export RAJIT_THRESHOLD=1 ;;
+          esac
+          for i in 1 2 3 4 5 6; do
+            cargo test -p tests --test tests --profile ci > /tmp/run$i.log 2>&1
+            failed=$(grep -E '^test .* FAILED$' /tmp/run$i.log | awk '{print $2}' | tr '\n' ' ')
+            result=$(grep -E '^test result' /tmp/run$i.log | head -1)
+            echo "::notice title=${{ matrix.mode }} run $i::${result} FAILED: ${failed:-none}"
+          done
