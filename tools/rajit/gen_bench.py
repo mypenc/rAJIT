@@ -43,6 +43,9 @@ def write(name, code, expected):
     open(os.path.join(d, "test.toml"), "w").write("num_ticks = 1\n")
     open(os.path.join(d, "output.txt"), "w").write(expected + "\n")
 
+# ---- rajit_noop: measures the fixed cost of the test harness ----------------
+write("rajit_noop", push(p_str("ok")) + TRACE, "ok")
+
 # ---- rajit_loop: pure register arithmetic ---------------------------------
 N = 30_000_000
 body = push(p_reg(0)) + push(p_int(1)) + ADD2 + store_reg(0) + POP + push(p_reg(0)) + push(p_int(N)) + LESS2
@@ -50,7 +53,7 @@ code = push(p_int(0)) + store_reg(0) + POP + body + if_back(len(body)) + push(p_
 write("rajit_loop", code, str(N))
 
 # ---- rajit_vars: variable-heavy loop ---------------------------------------
-N = 1_000_000
+N = 3_000_000
 body = (
     push(p_str("sum"), p_str("sum")) + GETVAR + push(p_str("i")) + GETVAR + push(p_int(2)) + MUL + ADD2 + SETVAR
     + push(p_str("i"), p_str("i")) + GETVAR + push(p_int(1)) + ADD2 + SETVAR
@@ -63,7 +66,7 @@ code = (
 write("rajit_vars", code, str(N * (N - 1)))
 
 # ---- rajit_calls: function-call-heavy loop ----------------------------------
-N = 300_000
+N = 1_000_000
 f = define_function("f", ["x"], push(p_str("x")) + GETVAR + push(p_int(1)) + ADD2 + RETURN)
 body = (
     push(p_str("acc"), p_str("acc")) + GETVAR + push(p_int(1), p_str("f")) + CALLFN + SETVAR

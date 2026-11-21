@@ -165,6 +165,13 @@ panic = "unwind"
 [profile.release]
 panic = "abort"
 
+# rAJIT: release-like profile that can still run the test harness (needs unwinding),
+# with line tables so `perf` can attribute time to source lines.
+[profile.rajit]
+inherits = "release"
+panic = "unwind"
+debug = "line-tables-only"
+
 [profile.dist]
 inherits = "release"
 lto = true

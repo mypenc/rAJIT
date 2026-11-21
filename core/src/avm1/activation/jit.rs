@@ -16,6 +16,7 @@
 
 use super::{Activation, FrameControl, ReturnType};
 use crate::avm1::{Error, Value};
+use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::tag_utils::SwfSlice;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,9 +35,62 @@ const MAX_OPS: usize = 1 << 16;
 /// Upper bound on cache entries before the cache is flushed.
 const MAX_CACHE_ENTRIES: usize = 1 << 16;
 
+/// Binary operators that have a fast path when both operands are numbers.
+/// The left operand is the value below the top of the stack, the right one is the top.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BinOp {
+    Add,
+    Add2,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Less,
+    Greater,
+    Eq2,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+}
+
+impl BinOp {
+    fn is_comparison(self) -> bool {
+        matches!(self, BinOp::Less | BinOp::Greater | BinOp::Eq2)
+    }
+}
+
+/// Actions that take no operands from the bytecode, called directly without
+/// cloning the `Action` or going through the big dispatch `match`.
+#[derive(Clone, Copy)]
+pub(super) enum Nullary {
+    GetVariable,
+    SetVariable,
+    GetMember,
+    SetMember,
+    GetProperty,
+    SetProperty,
+    CallFunction,
+    CallMethod,
+    DefineLocal,
+    DefineLocal2,
+    Return,
+    InitObject,
+    InitArray,
+    NewObject,
+    NewMethod,
+    TypeOf,
+    ToString,
+    StringAdd,
+    Delete,
+    Delete2,
+}
+
 pub(super) enum Op {
     /// Any action without a dedicated fast path.
     Generic(Action<'static>),
+    Nullary(Nullary),
 
     PushNum(f64),
     PushBool(bool),
@@ -50,12 +104,7 @@ pub(super) enum Op {
     StoreRegister(u8),
     Not,
 
-    Add,
-    Add2,
-    Subtract,
-    Multiply,
-    Less2,
-    Greater,
+    Bin(BinOp),
     Increment,
     Decrement,
 
@@ -64,6 +113,20 @@ pub(super) enum Op {
     Jump(usize),
     WaitForFrame(WaitForFrame),
     WaitForFrame2(WaitForFrame2),
+
+    // Fused ops. Each one stands in for the first of several consecutive actions and, when its
+    // fast path applies, performs all of them and skips the following slots. The skipped slots
+    // keep their ordinary ops, so jumping into them (or `WaitForFrame` skipping over them)
+    // behaves exactly as before, and when the fast path doesn't apply, execution simply falls
+    // through to those ordinary ops.
+    /// `PushNum n; <Bin op>`
+    BinImm { op: BinOp, n: f64 },
+    /// `<comparison>; If target`
+    BinIf { op: BinOp, target: usize },
+    /// `PushNum n; <comparison>; If target`
+    BinImmIf { op: BinOp, n: f64, target: usize },
+    /// `Not; If target`
+    NotIf(usize),
 }
 
 pub(super) struct Compiled {
@@ -240,7 +303,7 @@ fn compile(code: &SwfSlice) -> Option<Compiled> {
     };
 
     // Pass 2: lower to ops.
-    let mut ops = Vec::with_capacity(n);
+    let mut ops: Vec<Op> = Vec::with_capacity(n);
     for (_, end, action) in raw {
         // SAFETY: every borrowed slice inside `action` points into `code`'s shared buffer,
         // which `Compiled::_data` keeps alive for as long as the ops exist, and the ops never
@@ -262,18 +325,48 @@ fn compile(code: &SwfSlice) -> Option<Compiled> {
             Action::PushDuplicate => Op::PushDuplicate,
             Action::StoreRegister(a) => Op::StoreRegister(a.register),
             Action::Not => Op::Not,
-            Action::Add => Op::Add,
-            Action::Add2 => Op::Add2,
-            Action::Subtract => Op::Subtract,
-            Action::Multiply => Op::Multiply,
-            Action::Less2 => Op::Less2,
-            Action::Greater => Op::Greater,
+            Action::Add => Op::Bin(BinOp::Add),
+            Action::Add2 => Op::Bin(BinOp::Add2),
+            Action::Subtract => Op::Bin(BinOp::Sub),
+            Action::Multiply => Op::Bin(BinOp::Mul),
+            Action::Divide => Op::Bin(BinOp::Div),
+            Action::Modulo => Op::Bin(BinOp::Mod),
+            Action::Less2 => Op::Bin(BinOp::Less),
+            Action::Greater => Op::Bin(BinOp::Greater),
+            Action::Equals2 => Op::Bin(BinOp::Eq2),
+            Action::BitAnd => Op::Bin(BinOp::And),
+            Action::BitOr => Op::Bin(BinOp::Or),
+            Action::BitXor => Op::Bin(BinOp::Xor),
+            Action::BitLShift => Op::Bin(BinOp::Shl),
+            Action::BitRShift => Op::Bin(BinOp::Shr),
             Action::Increment => Op::Increment,
             Action::Decrement => Op::Decrement,
+            Action::GetVariable => Op::Nullary(Nullary::GetVariable),
+            Action::SetVariable => Op::Nullary(Nullary::SetVariable),
+            Action::GetMember => Op::Nullary(Nullary::GetMember),
+            Action::SetMember => Op::Nullary(Nullary::SetMember),
+            Action::GetProperty => Op::Nullary(Nullary::GetProperty),
+            Action::SetProperty => Op::Nullary(Nullary::SetProperty),
+            Action::CallFunction => Op::Nullary(Nullary::CallFunction),
+            Action::CallMethod => Op::Nullary(Nullary::CallMethod),
+            Action::DefineLocal => Op::Nullary(Nullary::DefineLocal),
+            Action::DefineLocal2 => Op::Nullary(Nullary::DefineLocal2),
+            Action::Return => Op::Nullary(Nullary::Return),
+            Action::InitObject => Op::Nullary(Nullary::InitObject),
+            Action::InitArray => Op::Nullary(Nullary::InitArray),
+            Action::NewObject => Op::Nullary(Nullary::NewObject),
+            Action::NewMethod => Op::Nullary(Nullary::NewMethod),
+            Action::TypeOf => Op::Nullary(Nullary::TypeOf),
+            Action::ToString => Op::Nullary(Nullary::ToString),
+            Action::StringAdd => Op::Nullary(Nullary::StringAdd),
+            Action::Delete => Op::Nullary(Nullary::Delete),
+            Action::Delete2 => Op::Nullary(Nullary::Delete2),
             other => Op::Generic(other),
         };
         ops.push(op);
     }
+
+    fuse(&mut ops);
 
     Some(Compiled {
         ops,
@@ -281,6 +374,32 @@ fn compile(code: &SwfSlice) -> Option<Compiled> {
         code_end: code.end,
         _data: code.data_arc().clone(),
     })
+}
+
+/// Peephole-fuses common instruction sequences. See the comment on the fused `Op` variants for
+/// why this keeps the one-slot-per-action layout intact.
+fn fuse(ops: &mut [Op]) {
+    for i in 0..ops.len() {
+        let fused = match (&ops[i], ops.get(i + 1), ops.get(i + 2)) {
+            (Op::PushNum(n), Some(Op::Bin(op)), Some(Op::If(target))) if op.is_comparison() => {
+                Some(Op::BinImmIf {
+                    op: *op,
+                    n: *n,
+                    target: *target,
+                })
+            }
+            (Op::PushNum(n), Some(Op::Bin(op)), _) => Some(Op::BinImm { op: *op, n: *n }),
+            (Op::Bin(op), Some(Op::If(target)), _) if op.is_comparison() => Some(Op::BinIf {
+                op: *op,
+                target: *target,
+            }),
+            (Op::Not, Some(Op::If(target)), _) => Some(Op::NotIf(*target)),
+            _ => None,
+        };
+        if let Some(fused) = fused {
+            ops[i] = fused;
+        }
+    }
 }
 
 fn lower_push(mut items: Vec<SwfValue<'static>>) -> Op {
@@ -371,32 +490,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                     self.context.avm1.push(result.into());
                 }
 
-                Op::Add => match self.context.avm1.top2_numbers() {
-                    Some((b, a)) => self.context.avm1.replace_top2(Value::Number(b + a)),
-                    None => control!(self.action_add()),
-                },
-                Op::Add2 => match self.context.avm1.top2_numbers() {
-                    Some((b, a)) => self.context.avm1.replace_top2(Value::Number(b + a)),
-                    None => control!(self.action_add_2()),
-                },
-                Op::Subtract => match self.context.avm1.top2_numbers() {
-                    Some((b, a)) => self.context.avm1.replace_top2(Value::Number(b - a)),
-                    None => control!(self.action_subtract()),
-                },
-                Op::Multiply => match self.context.avm1.top2_numbers() {
-                    Some((b, a)) => self.context.avm1.replace_top2(Value::Number(b * a)),
-                    None => control!(self.action_multiply()),
-                },
-                Op::Less2 => match self.context.avm1.top2_numbers() {
-                    // `b < a`, with NaN giving `undefined`.
-                    Some((b, a)) => self.context.avm1.replace_top2(num_lt(b, a)),
-                    None => control!(self.action_less_2()),
-                },
-                Op::Greater => match self.context.avm1.top2_numbers() {
-                    // `a < b`, with NaN giving `undefined`.
-                    Some((b, a)) => self.context.avm1.replace_top2(num_lt(a, b)),
-                    None => control!(self.action_greater()),
-                },
+                Op::Bin(op) => {
+                    if !self.bin_fast(*op) {
+                        control!(self.generic_bin(*op));
+                    }
+                }
                 Op::Increment => match self.context.avm1.top_number() {
                     Some(a) => self.context.avm1.replace_top(Value::Number(a + 1.0)),
                     None => control!(self.action_increment()),
@@ -405,6 +503,76 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                     Some(a) => self.context.avm1.replace_top(Value::Number(a - 1.0)),
                     None => control!(self.action_decrement()),
                 },
+
+                Op::Nullary(n) => control!(match n {
+                    Nullary::GetVariable => self.action_get_variable(),
+                    Nullary::SetVariable => self.action_set_variable(),
+                    Nullary::GetMember => self.action_get_member(),
+                    Nullary::SetMember => self.action_set_member(),
+                    Nullary::GetProperty => self.action_get_property(),
+                    Nullary::SetProperty => self.action_set_property(),
+                    Nullary::CallFunction => self.action_call_function(),
+                    Nullary::CallMethod => self.action_call_method(),
+                    Nullary::DefineLocal => self.action_define_local(),
+                    Nullary::DefineLocal2 => self.action_define_local_2(),
+                    Nullary::Return => self.action_return(),
+                    Nullary::InitObject => self.action_init_object(),
+                    Nullary::InitArray => self.action_init_array(),
+                    Nullary::NewObject => self.action_new_object(),
+                    Nullary::NewMethod => self.action_new_method(),
+                    Nullary::TypeOf => self.action_type_of(),
+                    Nullary::ToString => self.action_to_string(),
+                    Nullary::StringAdd => self.action_string_add(),
+                    Nullary::Delete => self.action_delete(),
+                    Nullary::Delete2 => self.action_delete_2(),
+                }),
+
+                Op::BinImm { op, n } => {
+                    let version = self.swf_version();
+                    let fast = self
+                        .context
+                        .avm1
+                        .top_number()
+                        .and_then(|b| eval_bin(*op, b, *n, version));
+                    if let Some(result) = fast {
+                        self.context.avm1.replace_top(result);
+                        pc += 1; // skip the fused `Bin` slot
+                    } else {
+                        self.context.avm1.push(Value::Number(*n));
+                    }
+                }
+                Op::BinIf { op, target } => {
+                    let version = self.swf_version();
+                    let fast = self
+                        .context
+                        .avm1
+                        .top2_numbers()
+                        .and_then(|(b, a)| eval_bin(*op, b, a, version));
+                    if let Some(result) = fast {
+                        self.context.avm1.drop_top(2);
+                        pc = if result.as_bool(version) { *target } else { pc + 1 };
+                    } else {
+                        control!(self.generic_bin(*op));
+                    }
+                }
+                Op::BinImmIf { op, n, target } => {
+                    let version = self.swf_version();
+                    let fast = self
+                        .context
+                        .avm1
+                        .top_number()
+                        .and_then(|b| eval_bin(*op, b, *n, version));
+                    if let Some(result) = fast {
+                        self.context.avm1.drop_top(1);
+                        pc = if result.as_bool(version) { *target } else { pc + 2 };
+                    } else {
+                        self.context.avm1.push(Value::Number(*n));
+                    }
+                }
+                Op::NotIf(target) => {
+                    let val = self.context.avm1.pop();
+                    pc = if val.as_bool(self.swf_version()) { pc + 1 } else { *target };
+                }
 
                 Op::If(target) => {
                     let val = self.context.avm1.pop();
@@ -427,6 +595,75 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             }
         }
     }
+}
+
+impl<'a, 'gc> Activation<'a, 'gc> {
+    /// Fast path for a binary operator: if both operands are numbers, computes the result
+    /// in place and returns `true`. Otherwise leaves the stack untouched.
+    #[inline(always)]
+    fn bin_fast(&mut self, op: BinOp) -> bool {
+        if let Some((b, a)) = self.context.avm1.top2_numbers()
+            && let Some(result) = eval_bin(op, b, a, self.swf_version())
+        {
+            self.context.avm1.replace_top2(result);
+            return true;
+        }
+        false
+    }
+
+    /// The interpreter's own implementation of a binary operator.
+    fn generic_bin(&mut self, op: BinOp) -> Result<FrameControl<'gc>, Error<'gc>> {
+        match op {
+            BinOp::Add => self.action_add(),
+            BinOp::Add2 => self.action_add_2(),
+            BinOp::Sub => self.action_subtract(),
+            BinOp::Mul => self.action_multiply(),
+            BinOp::Div => self.action_divide(),
+            BinOp::Mod => self.action_modulo(),
+            BinOp::Less => self.action_less_2(),
+            BinOp::Greater => self.action_greater(),
+            BinOp::Eq2 => self.action_equals_2(),
+            BinOp::And => self.action_bit_and(),
+            BinOp::Or => self.action_bit_or(),
+            BinOp::Xor => self.action_bit_xor(),
+            BinOp::Shl => self.action_bit_lshift(),
+            BinOp::Shr => self.action_bit_rshift(),
+        }
+    }
+}
+
+/// Computes `b <op> a` for two numbers, mirroring the interpreter's `action_*` implementations
+/// exactly. Returns `None` when the interpreter has behaviour a fast path can't reproduce.
+#[inline(always)]
+fn eval_bin<'gc>(op: BinOp, b: f64, a: f64, swf_version: u8) -> Option<Value<'gc>> {
+    Some(match op {
+        BinOp::Add | BinOp::Add2 => Value::Number(b + a),
+        BinOp::Sub => Value::Number(b - a),
+        BinOp::Mul => Value::Number(b * a),
+        BinOp::Div => {
+            // SWF 4 yields the string "#ERROR#" on division by zero.
+            if a == 0.0 && swf_version < 5 {
+                return None;
+            }
+            Value::Number(b / a)
+        }
+        BinOp::Mod => Value::Number(b % a),
+        BinOp::Less => num_lt(b, a),
+        BinOp::Greater => num_lt(a, b),
+        // Flash treats NaN == NaN as true here.
+        BinOp::Eq2 => Value::Bool(b == a || (b.is_nan() && a.is_nan())),
+        BinOp::And => Value::Number(f64::from(f64_to_wrapping_i32(a) & f64_to_wrapping_i32(b))),
+        BinOp::Or => Value::Number(f64::from(f64_to_wrapping_i32(a) | f64_to_wrapping_i32(b))),
+        BinOp::Xor => Value::Number(f64::from(f64_to_wrapping_i32(b) ^ f64_to_wrapping_i32(a))),
+        BinOp::Shl => {
+            let shift = f64_to_wrapping_i32(a) & 0b11111;
+            Value::Number(f64::from(f64_to_wrapping_i32(b) << shift))
+        }
+        BinOp::Shr => {
+            let shift = f64_to_wrapping_u32(a) & 0b11111;
+            Value::Number(f64::from(f64_to_wrapping_i32(b) >> shift))
+        }
+    })
 }
 
 #[inline(always)]

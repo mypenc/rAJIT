@@ -396,6 +396,13 @@ impl<'gc> Avm1<'gc> {
         }
     }
 
+    /// rAJIT: discards the top `n` stack slots. The caller must know there are at least `n`.
+    #[inline(always)]
+    pub fn drop_top(&mut self, n: usize) {
+        let len = self.stack.len();
+        self.stack.truncate(len.saturating_sub(n));
+    }
+
     /// rAJIT: overwrites the top stack slot. Must only be called after `top_number` returned `Some`.
     #[inline(always)]
     pub fn replace_top(&mut self, value: Value<'gc>) {

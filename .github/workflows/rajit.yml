@@ -41,9 +41,33 @@ jobs:
           RAJIT_THRESHOLD: "1"
         run: cargo test -p tests --test tests --profile ci -- avm1
 
+  bench:
+    name: Benchmarks and profile (Linux, release-like)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(cat .github/linux-dependencies.txt)
+          sudo apt-get install -y linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" || true
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rajit-bench
+
+      - name: Build tests (rajit profile)
+        run: cargo test -p tests --test tests --profile rajit --no-run
+
       # interpreter (RAJIT_DISABLE=1) vs compiled tier; results appear as annotations
       - name: Benchmarks
-        run: bash .github/scripts/bench.sh ci
+        run: bash .github/scripts/bench.sh rajit
+
+      - name: Profile
+        run: bash .github/scripts/profile.sh rajit
 
   build-windows:
     name: Build rajit.exe (Windows x64)
