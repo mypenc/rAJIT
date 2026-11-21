@@ -41,6 +41,15 @@ jobs:
           RAJIT_THRESHOLD: "1"
         run: cargo test -p tests --test tests --profile ci -- avm1
 
+      # 30M-iteration register-arithmetic loop: interpreter vs compiled tier.
+      - name: Benchmark (interpreter, RAJIT_DISABLE=1)
+        env:
+          RAJIT_DISABLE: "1"
+        run: cargo test -p tests --test tests --profile ci -- rajit_loop 2>&1 | grep -E "test result"
+
+      - name: Benchmark (rAJIT compiled tier)
+        run: cargo test -p tests --test tests --profile ci -- rajit_loop 2>&1 | grep -E "test result"
+
   build-windows:
     name: Build rajit.exe (Windows x64)
     runs-on: windows-2025
