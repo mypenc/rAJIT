@@ -43,7 +43,12 @@ def write(name, code, expected):
     d = os.path.join("tests", "tests", "swfs", "avm1", name)
     os.makedirs(d, exist_ok=True)
     open(os.path.join(d, "test.swf"), "wb").write(swf(code))
-    open(os.path.join(d, "test.toml"), "w").write("num_ticks = 1\n")
+    open(os.path.join(d, "test.toml"), "w").write(
+        "num_ticks = 1\n\n"
+        "# CPU-heavy benchmark: kept out of the default parallel suite because it starves\n"
+        "# wall-clock-sensitive tests (e.g. getTimer_test). Run with `-- --ignored rajit_`.\n"
+        "ignore = true\n"
+    )
     open(os.path.join(d, "output.txt"), "w").write(expected + "\n")
 
 # ---- rajit_noop: measures the fixed cost of the test harness ----------------

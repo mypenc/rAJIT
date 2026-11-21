@@ -9,7 +9,7 @@ best_of_3() {
   local test="$1" best=""
   for _ in 1 2 3; do
     local out secs
-    out=$(cargo test -p tests --test tests --profile "$profile" -- "$test" 2>&1)
+    out=$(cargo test -p tests --test tests --profile "$profile" -- --ignored "$test" 2>&1)
     secs=$(echo "$out" | grep -oE 'finished in [0-9.]+s' | grep -oE '[0-9.]+' | head -1)
     if ! echo "$out" | grep -q "test result: ok"; then
       echo "::error title=bench::$test FAILED"; echo "$out" | tail -20; exit 1

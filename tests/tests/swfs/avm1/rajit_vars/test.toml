@@ -1,1 +1,5 @@
 num_ticks = 1
+
+# CPU-heavy benchmark: kept out of the default parallel suite because it starves
+# wall-clock-sensitive tests (e.g. getTimer_test). Run with `-- --ignored rajit_`.
+ignore = true

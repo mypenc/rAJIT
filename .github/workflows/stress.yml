@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [baseline-upstream, interpreter, forced-compile]
+        mode: [interpreter, forced-compile]
     steps:
       - uses: actions/checkout@v4
         if: matrix.mode != 'baseline-upstream'
