@@ -47,3 +47,8 @@ tracing-subscriber = { workspace = true }
 name = "tests"
 harness = false
 path = "tests/regression_tests.rs"
+
+# rAJIT: render-path benchmark (run explicitly: cargo test -p tests --test rajit_render_bench --release -- --ignored --nocapture)
+[[test]]
+name = "rajit_render_bench"
+path = "tests/rajit_render_bench.rs"

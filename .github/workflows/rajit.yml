@@ -73,6 +73,9 @@ jobs:
       - name: Profile
         run: bash .github/scripts/profile.sh rajit
 
+      - name: Render-path benchmark (synthetic tile game)
+        run: bash .github/scripts/render_bench.sh rajit
+
   build-windows:
     name: Build rajit.exe (Windows x64)
     runs-on: windows-2025
