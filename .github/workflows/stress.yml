@@ -24,7 +24,7 @@ jobs:
         if: matrix.mode == 'baseline-upstream'
         with:
           repository: ruffle-rs/ruffle
-          ref: 0ddd12b6d3b6ac4ac3cb4bbe7a6de48c3d3a2a2f
+          ref: 0ddd12b6adf211f556a375e96fca70095de5835b
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
