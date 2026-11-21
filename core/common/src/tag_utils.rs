@@ -536,6 +536,11 @@ impl SwfSlice {
         &self.entire_data[self.start..self.end]
     }
 
+    /// The shared buffer backing this slice. Holding a clone keeps the bytes alive.
+    pub fn data_arc(&self) -> &Arc<Vec<u8>> {
+        &self.entire_data
+    }
+
     /// Access the entire data of the movie backing this SwfSlice.
     pub fn entire_data(&self) -> &[u8] {
         &self.entire_data

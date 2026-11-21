@@ -369,6 +369,41 @@ impl<'gc> Avm1<'gc> {
         self.registers = [Value::Undefined; 4];
     }
 
+    /// rAJIT: if the top two stack slots are both numbers, returns `(below, top)`.
+    #[inline(always)]
+    pub fn top2_numbers(&self) -> Option<(f64, f64)> {
+        match self.stack.as_slice() {
+            [.., Value::Number(b), Value::Number(a)] => Some((*b, *a)),
+            _ => None,
+        }
+    }
+
+    /// rAJIT: replaces the top two stack slots with a single value.
+    /// Must only be called after `top2_numbers` returned `Some`.
+    #[inline(always)]
+    pub fn replace_top2(&mut self, value: Value<'gc>) {
+        let n = self.stack.len();
+        self.stack.truncate(n - 1);
+        self.stack[n - 2] = value;
+    }
+
+    /// rAJIT: if the top stack slot is a number, returns it.
+    #[inline(always)]
+    pub fn top_number(&self) -> Option<f64> {
+        match self.stack.last() {
+            Some(Value::Number(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// rAJIT: overwrites the top stack slot. Must only be called after `top_number` returned `Some`.
+    #[inline(always)]
+    pub fn replace_top(&mut self, value: Value<'gc>) {
+        if let Some(top) = self.stack.last_mut() {
+            *top = value;
+        }
+    }
+
     pub fn push(&mut self, value: Value<'gc>) {
         self.stack.push(value);
     }

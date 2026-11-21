@@ -30,6 +30,8 @@ use web_time::Instant;
 
 use super::object_reference::MovieClipReference;
 
+mod jit;
+
 #[derive(Clone)]
 pub enum ReturnType<'gc> {
     Implicit,
@@ -511,13 +513,33 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     }
 
     pub fn run_actions(&mut self, code: SwfSlice) -> Result<ReturnType<'gc>, Error<'gc>> {
-        let mut read = Reader::new(&code.entire_data()[code.start..]);
+        // rAJIT: hot code runs on the compiled tier.
+        if let Some(compiled) = jit::lookup(&code) {
+            return self.run_compiled(&code, &compiled, 0);
+        }
+
+        let data = code.entire_data();
+        let mut read = Reader::new(&data[code.start..]);
+        let mut back_jumps = 0u32;
 
         loop {
+            let before = read.get_ref().as_ptr() as usize;
             let result = self.do_action(&code, &mut read);
             match result {
                 Ok(FrameControl::Return(return_type)) => break Ok(return_type),
-                Ok(FrameControl::Continue) => {}
+                Ok(FrameControl::Continue) => {
+                    // A taken backward jump means we are in a loop: switch to the
+                    // compiled tier mid-run once the loop proves hot (on-stack replacement).
+                    if (read.get_ref().as_ptr() as usize) < before {
+                        back_jumps += 1;
+                        if back_jumps == jit::osr_threshold() {
+                            let pos = data.len() - read.get_ref().len();
+                            if let Some((compiled, pc)) = jit::osr_compile(&code, pos) {
+                                break self.run_compiled(&code, &compiled, pc);
+                            }
+                        }
+                    }
+                }
                 Err(e) => break Err(e),
             }
         }
@@ -542,7 +564,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             Ok(FrameControl::Return(ReturnType::Implicit))
         } else {
             let action = reader.read_action()?;
+            self.exec_action(action, data, reader)
+        }
+    }
 
+    /// Executes one already-decoded action. Shared by the interpreter and the compiled tier.
+    fn exec_action<'b>(
+        &mut self,
+        action: Action<'b>,
+        data: &'b SwfSlice,
+        reader: &mut Reader<'b>,
+    ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        {
             match action {
                 Action::Add => self.action_add(),
                 Action::Add2 => self.action_add_2(),
@@ -1881,44 +1914,47 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     fn action_push(&mut self, action: PushValues) -> Result<FrameControl<'gc>, Error<'gc>> {
         for value in action {
-            use swf::avm1::types::Value as SwfValue;
-            let value = match value? {
-                SwfValue::Undefined => Value::Undefined,
-                SwfValue::Null => Value::Null,
-                SwfValue::Bool(v) => v.into(),
-                SwfValue::Int(v) => v.into(),
-                SwfValue::Float(v) => v.into(),
-                SwfValue::Double(v) => v.into(),
-                SwfValue::Str(v) => AvmString::new(self.gc(), v.decode(self.encoding())).into(),
-                SwfValue::Register(v) => self.current_register(v),
-                SwfValue::ConstantPool(i) => {
-                    if let Some(value) = self.constant_pool().get(i as usize) {
-                        *value
-                    } else {
-                        avm_warn!(
-                            self,
-                            "ActionPush: Constant pool index {} out of range (len = {})",
-                            i,
-                            self.constant_pool().len()
-                        );
-                        Value::Undefined
-                    }
-                }
-                SwfValue::Invalid { kind } => {
-                    // Newest Flash Player exits on unknown value types. However, older versions
-                    // (at least FP9) just ignore them and continue to the next value.
-                    // We follow the lenient behavior in order to support more content (e.g. #8389
-                    // doesn't work on newest Flash Player).
-                    // TODO: Return an error depending on the player version?
-                    avm_warn!(self, "Invalid value type in ActionPush: {kind}");
-                    continue;
-                }
-            };
-            self.stack_push(value); // Needs to handle MovieClipReferences, in case pushing a register
+            self.push_swf_value(value?);
         }
         Ok(FrameControl::Continue)
     }
 
+    fn push_swf_value(&mut self, value: swf::avm1::types::Value<'_>) {
+        use swf::avm1::types::Value as SwfValue;
+        let value = match value {
+            SwfValue::Undefined => Value::Undefined,
+            SwfValue::Null => Value::Null,
+            SwfValue::Bool(v) => v.into(),
+            SwfValue::Int(v) => v.into(),
+            SwfValue::Float(v) => v.into(),
+            SwfValue::Double(v) => v.into(),
+            SwfValue::Str(v) => AvmString::new(self.gc(), v.decode(self.encoding())).into(),
+            SwfValue::Register(v) => self.current_register(v),
+            SwfValue::ConstantPool(i) => {
+                if let Some(value) = self.constant_pool().get(i as usize) {
+                    *value
+                } else {
+                    avm_warn!(
+                        self,
+                        "ActionPush: Constant pool index {} out of range (len = {})",
+                        i,
+                        self.constant_pool().len()
+                    );
+                    Value::Undefined
+                }
+            }
+            SwfValue::Invalid { kind } => {
+                // Newest Flash Player exits on unknown value types. However, older versions
+                // (at least FP9) just ignore them and continue to the next value.
+                // We follow the lenient behavior in order to support more content (e.g. #8389
+                // doesn't work on newest Flash Player).
+                // TODO: Return an error depending on the player version?
+                avm_warn!(self, "Invalid value type in ActionPush: {kind}");
+                return;
+            }
+        };
+        self.stack_push(value); // Needs to handle MovieClipReferences, in case pushing a register
+    }
     fn action_push_duplicate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
         let val = self.context.avm1.pop();
         self.context.avm1.push(val);
@@ -2365,6 +2401,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         action: WaitForFrame,
         r: &mut Reader<'_>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        if !self.wait_for_frame_loaded(&action) {
+            // Note that the offset is given in # of actions, NOT in bytes.
+            // Read the actions and toss them away.
+            skip_actions(r, action.num_actions_to_skip);
+        }
+        Ok(FrameControl::Continue)
+    }
+
+    fn wait_for_frame_loaded(&mut self, action: &WaitForFrame) -> bool {
         let frame_num = action.frame;
         let loaded = if frame_num > 16000 {
             // Exceeded maximum number of frames.
@@ -2376,13 +2421,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 .unwrap_or(true)
         };
 
-        if !loaded {
-            // Note that the offset is given in # of actions, NOT in bytes.
-            // Read the actions and toss them away.
-            skip_actions(r, action.num_actions_to_skip);
-        }
-
-        Ok(FrameControl::Continue)
+        loaded
     }
 
     fn action_wait_for_frame_2(
@@ -2390,6 +2429,15 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         action: WaitForFrame2,
         r: &mut Reader<'_>,
     ) -> Result<FrameControl<'gc>, Error<'gc>> {
+        if !self.wait_for_frame_2_loaded(&action)? {
+            // Note that the offset is given in # of actions, NOT in bytes.
+            // Read the actions and toss them away.
+            skip_actions(r, action.num_actions_to_skip);
+        }
+        Ok(FrameControl::Continue)
+    }
+
+    fn wait_for_frame_2_loaded(&mut self, _action: &WaitForFrame2) -> Result<bool, Error<'gc>> {
         let frame_val = self.context.avm1.pop();
         let frame_num = match frame_val {
             Value::Number(n) if n.fract() == 0.0 => f64_to_wrapping_i32(n),
@@ -2421,13 +2469,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                 .unwrap_or(true)
         };
 
-        if !loaded {
-            // Note that the offset is given in # of actions, NOT in bytes.
-            // Read the actions and toss them away.
-            skip_actions(r, action.num_actions_to_skip);
-        }
-
-        Ok(FrameControl::Continue)
+        Ok(loaded)
     }
 
     fn action_with(
