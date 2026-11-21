@@ -118,6 +118,11 @@ pub fn str_eq(left: &WStr, right: &WStr) -> bool {
 }
 
 pub fn str_eq_ignore_case(left: &WStr, right: &WStr) -> bool {
+    // Very common for property lookups: the very same string object is used as key and as query.
+    if core::ptr::eq(left, right) {
+        return true;
+    }
+
     // Lowercasing maps one code unit to one code unit, so differing lengths can never match.
     if left.len() != right.len() {
         return false;

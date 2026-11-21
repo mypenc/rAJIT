@@ -33,7 +33,17 @@ jobs:
 
       # Shared string code (hashing / case-insensitive equality) was touched, so run everything.
       - name: Full regression suite
-        run: cargo test -p tests --test tests --profile ci
+        run: |
+          set +e
+          cargo test -p tests --test tests --profile ci 2>&1 | tee /tmp/full.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            names=$(grep -E '^test .* FAILED$' /tmp/full.log | head -60 | awk '{printf "%s%%0A", $0}')
+            echo "::error title=failing tests::${names}"
+            details=$(grep -E -A6 '^---- .* stdout ----' /tmp/full.log | head -80 | cut -c1-240 | awk '{printf "%s%%0A", $0}')
+            echo "::error title=failure details::${details}"
+          fi
+          exit $status
 
       - name: AVM1 tests, default thresholds
         run: cargo test -p tests --test tests --profile ci -- avm1
