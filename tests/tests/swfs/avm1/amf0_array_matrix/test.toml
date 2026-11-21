@@ -1,0 +1,12 @@
+num_ticks = 10
+log_fetch = true
+
+[[compilers]]
+type = "Rascal"
+target = "test.swf"
+scripts = ["main.as", "utils.as"]
+use_network = true
+swf_version = 8
+
+[shared_objects."localhost/test.swf/RuffleMatrixStore"]
+expected = "RuffleMatrixStore"
