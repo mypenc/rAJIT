@@ -62,10 +62,10 @@ jobs:
 
       # Compile every block on its first execution so the whole suite
       # exercises the compiled tier instead of the interpreter.
-      - name: AVM1 tests, compile everything (RAJIT_THRESHOLD=1)
+      - name: Full suite, compile everything (RAJIT_THRESHOLD=1)
         env:
           RAJIT_THRESHOLD: "1"
-        run: cargo test -p tests --test tests --profile ci -- avm1
+        run: cargo test -p tests --test tests --profile ci
 
   bench:
     name: Benchmarks and profile (Linux, release-like)
