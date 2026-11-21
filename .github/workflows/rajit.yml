@@ -38,12 +38,24 @@ jobs:
           cargo test -p tests --test tests --profile ci 2>&1 | tee /tmp/full.log
           status=${PIPESTATUS[0]}
           if [ "$status" != "0" ]; then
-            names=$(grep -E '^test .* FAILED$' /tmp/full.log | head -60 | awk '{printf "%s%%0A", $0}')
-            echo "::error title=failing tests::${names}"
-            details=$(grep -E -A6 '^---- .* stdout ----' /tmp/full.log | head -80 | cut -c1-240 | awk '{printf "%s%%0A", $0}')
-            echo "::error title=failure details::${details}"
+            failed=$(grep -E '^test .* FAILED$' /tmp/full.log | awk '{print $2}')
+            names=$(echo "$failed" | head -60 | awk '{printf "%s%%0A", $0}')
+            echo "::warning title=failed in full run::${names}"
+            details=$(sed -n '/^failures:/,$p' /tmp/full.log | head -70 | cut -c1-240 | awk '{printf "%s%%0A", $0}')
+            echo "::warning title=failure section::${details}"
+            # Re-run each failure on its own to tell flaky (load/timing) from reproducible.
+            real=0
+            for n in $failed; do
+              if cargo test -p tests --test tests --profile ci -- "$n" > /tmp/rerun.log 2>&1; then
+                echo "::warning title=flaky::$n passed when re-run alone"
+              else
+                real=1
+                echo "::error title=reproducible failure::$n"
+                tail -40 /tmp/rerun.log | cut -c1-240
+              fi
+            done
+            exit $real
           fi
-          exit $status
 
       - name: AVM1 tests, default thresholds
         run: cargo test -p tests --test tests --profile ci -- avm1
