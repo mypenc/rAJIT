@@ -14,6 +14,9 @@ def act(code, body=b""):
 def p_str(s):  return b"\x00" + s.encode() + b"\x00"
 def p_int(n):  return b"\x07" + struct.pack("<i", n)
 def p_reg(r):  return b"\x04" + bytes([r])
+def p_cp(i):   return b"\x08" + bytes([i])
+def constant_pool(*strs):
+    return act(0x88, struct.pack("<H", len(strs)) + b"".join(x.encode() + b"\x00" for x in strs))
 def push(*items): return act(0x96, b"".join(items))
 
 ADD2, SUB, MUL, POP, LESS2, TRACE = (act(c) for c in (0x47, 0x0B, 0x0C, 0x17, 0x48, 0x26))
@@ -78,4 +81,32 @@ code = (
     + body + if_back(len(body)) + push(p_str("acc")) + GETVAR + TRACE
 )
 write("rajit_calls", code, str(N))
+
+# ---- the same two loops, but naming variables through a ConstantPool like real compilers do ----
+N = 3_000_000
+SUM, I = p_cp(0), p_cp(1)
+body = (
+    push(SUM, SUM) + GETVAR + push(I) + GETVAR + push(p_int(2)) + MUL + ADD2 + SETVAR
+    + push(I, I) + GETVAR + push(p_int(1)) + ADD2 + SETVAR
+    + push(I) + GETVAR + push(p_int(N)) + LESS2
+)
+code = (
+    constant_pool("sum", "i") + push(I, p_int(0)) + SETVAR + push(SUM, p_int(0)) + SETVAR
+    + body + if_back(len(body)) + push(SUM) + GETVAR + TRACE
+)
+write("rajit_vars_cp", code, str(N * (N - 1)))
+
+N = 1_000_000
+I, ACC, F, X = p_cp(0), p_cp(1), p_cp(2), p_cp(3)
+f = define_function("f", ["x"], push(X) + GETVAR + push(p_int(1)) + ADD2 + RETURN)
+body = (
+    push(ACC, ACC) + GETVAR + push(p_int(1), F) + CALLFN + SETVAR
+    + push(I, I) + GETVAR + push(p_int(1)) + ADD2 + SETVAR
+    + push(I) + GETVAR + push(p_int(N)) + LESS2
+)
+code = (
+    constant_pool("i", "acc", "f", "x") + f + push(I, p_int(0)) + SETVAR + push(ACC, p_int(0)) + SETVAR
+    + body + if_back(len(body)) + push(ACC) + GETVAR + TRACE
+)
+write("rajit_calls_cp", code, str(N))
 print("ok")

@@ -19,6 +19,7 @@ use crate::avm1::{Error, Value};
 use crate::ecma_conversions::{f64_to_wrapping_i32, f64_to_wrapping_u32};
 use crate::tag_utils::SwfSlice;
 use std::cell::RefCell;
+use fnv::FnvBuildHasher;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -148,7 +149,7 @@ type Key = (usize, usize, usize);
 
 #[derive(Default)]
 struct Cache {
-    map: HashMap<Key, Entry>,
+    map: HashMap<Key, Entry, FnvBuildHasher>,
 }
 
 thread_local! {

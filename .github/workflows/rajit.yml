@@ -31,6 +31,10 @@ jobs:
       - name: Build tests
         run: cargo test -p tests --test tests --profile ci --no-run
 
+      # Shared string code (hashing / case-insensitive equality) was touched, so run everything.
+      - name: Full regression suite
+        run: cargo test -p tests --test tests --profile ci
+
       - name: AVM1 tests, default thresholds
         run: cargo test -p tests --test tests --profile ci -- avm1
 

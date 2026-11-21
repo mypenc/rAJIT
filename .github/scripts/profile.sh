@@ -9,7 +9,7 @@ perf_bin=$(command -v perf || ls /usr/lib/linux-tools/*/perf 2>/dev/null | head 
 [ -z "$perf_bin" ] && { echo "::warning title=perf::perf not available"; exit 0; }
 sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 >/dev/null 2>&1 || true
 
-for t in rajit_vars rajit_calls; do
+for t in rajit_vars_cp rajit_calls_cp; do
   (cd tests && "$perf_bin" record -F 1999 -o "/tmp/$t.data" -- "$bin" "$t" >/dev/null 2>&1)
   rep=$("$perf_bin" report -i "/tmp/$t.data" --no-children --sort symbol --stdio 2>/dev/null \
         | grep -v '^#' | grep -v '^$' | head -28 | sed 's/  */ /g' | cut -c1-150)

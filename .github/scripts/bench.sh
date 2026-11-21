@@ -22,7 +22,7 @@ best_of_3() {
 noop=$(best_of_3 rajit_noop)
 echo "::notice title=bench rajit_noop::fixed harness cost=${noop}s"
 
-for t in rajit_loop rajit_vars rajit_calls; do
+for t in rajit_loop rajit_vars rajit_vars_cp rajit_calls rajit_calls_cp; do
   interp=$(RAJIT_DISABLE=1 best_of_3 "$t")
   jit=$(best_of_3 "$t")
   ni=$(awk "BEGIN{printf \"%.2f\", $interp - $noop}")
