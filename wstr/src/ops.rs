@@ -118,30 +118,9 @@ pub fn str_eq(left: &WStr, right: &WStr) -> bool {
 }
 
 pub fn str_eq_ignore_case(left: &WStr, right: &WStr) -> bool {
-    // Very common for property lookups: the very same string object is used as key and as query.
-    if core::ptr::eq(left, right) {
-        return true;
-    }
-
-    // Lowercasing maps one code unit to one code unit, so differing lengths can never match.
-    if left.len() != right.len() {
-        return false;
-    }
-
-    match (left.units(), right.units()) {
-        (Units::Bytes(a), Units::Bytes(b)) => a.iter().zip(b).all(|(&x, &y)| {
-            x == y || utils::swf_to_lowercase(x.into()) == utils::swf_to_lowercase(y.into())
-        }),
-        (Units::Wide(a), Units::Wide(b)) => a
-            .iter()
-            .zip(b)
-            .all(|(&x, &y)| x == y || utils::swf_to_lowercase(x) == utils::swf_to_lowercase(y)),
-        _ => {
-            let left = left.iter().map(utils::swf_to_lowercase);
-            let right = right.iter().map(utils::swf_to_lowercase);
-            left.eq(right)
-        }
-    }
+    let left = left.iter().map(utils::swf_to_lowercase);
+    let right = right.iter().map(utils::swf_to_lowercase);
+    left.eq(right)
 }
 
 pub fn str_cmp(left: &WStr, right: &WStr) -> core::cmp::Ordering {

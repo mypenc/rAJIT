@@ -86,18 +86,11 @@ pub fn utf16_code_unit_to_char(c: u16) -> char {
 
 /// Maps a UCS2 code unit to its lowercase variant according to the Flash Player.
 /// Note that this mapping is different that Rust's `to_lowercase`.
-#[inline]
 pub fn swf_to_lowercase(c: u16) -> u16 {
     if c < 0x80 {
         return (c as u8).to_ascii_lowercase().into();
     }
 
-    swf_to_lowercase_non_ascii(c)
-}
-
-#[cold]
-#[inline(never)]
-fn swf_to_lowercase_non_ascii(c: u16) -> u16 {
     match LOWERCASE_TABLE.binary_search_by(|&(key, _)| key.cmp(&c)) {
         Ok(i) => LOWERCASE_TABLE[i].1,
         Err(_) => c,
