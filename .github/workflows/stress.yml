@@ -9,22 +9,20 @@ env:
 
 jobs:
   stress:
-    name: Repeat suite ${{ matrix.mode }}
+    name: Repeat suite ${{ matrix.mode }} @ ${{ matrix.ref }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
-        mode: [interpreter, forced-compile]
+        include:
+          - { mode: interpreter, ref: main }
+          - { mode: interpreter, ref: exp-no-wstr }
+          - { mode: forced-compile, ref: exp-no-wstr }
     steps:
       - uses: actions/checkout@v4
-        if: matrix.mode != 'baseline-upstream'
-      # Control group: untouched upstream Ruffle at the commit rAJIT was forked from.
-      - uses: actions/checkout@v4
-        if: matrix.mode == 'baseline-upstream'
         with:
-          repository: ruffle-rs/ruffle
-          ref: 0ddd12b6adf211f556a375e96fca70095de5835b
+          ref: ${{ matrix.ref }}
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
@@ -32,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rajit-stress-${{ matrix.mode == 'baseline-upstream' && 'base' || 'rajit' }}
+          shared-key: rajit-stress-${{ matrix.ref }}
       - name: Build tests
         run: cargo test -p tests --test tests --profile ci --no-run
       - name: Run the suite 8 times
@@ -46,6 +44,11 @@ jobs:
             cargo test -p tests --test tests --profile ci > /tmp/run$i.log 2>&1
             failed=$(grep -E '^test .* FAILED$' /tmp/run$i.log | awk '{print $2}' | tr '\n' ' ')
             result=$(grep -E '^test result' /tmp/run$i.log | head -1 | cut -c1-80)
-            echo "::notice title=${{ matrix.mode }} run $i::${result} FAILED: ${failed:-none}"
+            echo "::notice title=${{ matrix.ref }} ${{ matrix.mode }} run $i::${result} FAILED: ${failed:-none}"
+            if [ -n "$failed" ] && [ -z "$shown" ]; then
+              shown=1
+              sec=$(sed -n '/^failures:/,$p' /tmp/run$i.log | head -40 | cut -c1-300 | awk '{printf "%s%%0A", $0}')
+              echo "::warning title=${{ matrix.ref }} failure detail::${sec}"
+            fi
           done
           exit 0
