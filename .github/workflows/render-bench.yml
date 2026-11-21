@@ -1,0 +1,22 @@
+name: rAJIT render benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(cat .github/linux-dependencies.txt)
+          sudo apt-get install -y linux-tools-common linux-tools-generic "linux-tools-$(uname -r)" || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rajit-bench
+      - name: Render-path benchmark
+        run: bash .github/scripts/render_bench.sh rajit
