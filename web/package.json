@@ -43,7 +43,7 @@
         "typedoc-plugin-mdn-links": "^5.1.1",
         "typescript": "^6.0.3",
         "typescript-eslint": "^8.71.2",
-        "webdriverio": "^9.32.0",
+        "webdriverio": "^10.2.0",
         "workspace-version": "^0.1.4"
     },
     "scripts": {
