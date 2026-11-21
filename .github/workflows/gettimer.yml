@@ -1,0 +1,46 @@
+name: getTimer_test isolation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  isolate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(cat .github/linux-dependencies.txt)
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rajit-test
+      - name: Build tests
+        run: cargo test -p tests --test tests --profile ci --no-run
+      - name: Hammer the one test
+        shell: bash {0}
+        run: |
+          bin=$(find "$PWD/target/ci" -path '*build/tests*' -name 'tests-*' -type f -perm -u+x ! -name '*.d' | head -1)
+          echo "binary: $bin"
+          T=from_gnash/misc-ming.all/getTimer_test
+          run_mode() {  # $1=label  $2=env assignment ("" for none)  $3=load(0/1)
+            pids=""
+            if [ "$3" = "1" ]; then
+              for j in 1 2 3 4; do ( while :; do :; done ) & pids="$pids $!"; done
+            fi
+            fails=0; total=150
+            for i in $(seq 1 $total); do
+              if ! (cd tests && env $2 "$bin" "$T" >/tmp/o.log 2>&1); then fails=$((fails+1)); cp /tmp/o.log /tmp/lastfail.log; fi
+            done
+            [ -n "$pids" ] && kill $pids 2>/dev/null
+            echo "::notice title=getTimer $1 load=$3::${fails}/${total} failed"
+          }
+          for load in 0 1; do
+            run_mode "interpreter" "RAJIT_DISABLE=1" $load
+            run_mode "default"     "X=1" $load
+            run_mode "forced"      "RAJIT_THRESHOLD=1" $load
+          done
+          [ -f /tmp/lastfail.log ] && { sec=$(grep -E -A14 '^---- ' /tmp/lastfail.log | head -30 | cut -c1-200 | awk '{printf "%s%%0A", $0}'); echo "::warning title=sample failure::${sec}"; }
+          exit 0
