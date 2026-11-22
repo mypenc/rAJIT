@@ -177,6 +177,10 @@ pub struct MovieClipData<'gc> {
     object1: Lock<Option<Avm1Object<'gc>>>,
     object2: Lock<Option<Avm2StageObject<'gc>>>,
 
+    /// rAJIT: cache of AVM1 event handlers known to be absent, as (epoch, event bits, object ptr).
+    /// See `property_map::handler_epoch`.
+    handler_cache: Cell<(u64, u16, usize)>,
+
     drop_target: Lock<Option<DisplayObject<'gc>>>,
 
     /// A DisplayObject (doesn't need to be visible) to use for hit tests instead of this clip.
@@ -248,6 +252,7 @@ impl<'gc> MovieClipData<'gc> {
             audio_stream: Cell::new(None),
             object1: Lock::new(None),
             object2: Lock::new(None),
+            handler_cache: Cell::new((0, 0, 0)),
             clip_event_handlers: OnceCell::new(),
             clip_event_flags: Cell::new(ClipEventFlag::empty()),
             flags: Cell::new(MovieClipFlags::empty()),
@@ -274,6 +279,35 @@ impl<'gc> MovieClipData<'gc> {
 }
 
 impl<'gc> MovieClip<'gc> {
+    /// rAJIT: `true` if this clip's AVM1 object provably has no handler named `name` (one of the
+    /// clip event methods, identified by `bit`), so queueing/running it can be skipped.
+    /// Cached per clip until anything that could introduce a handler happens.
+    pub fn avm1_handler_known_absent(
+        self,
+        object: Avm1Object<'gc>,
+        name: AvmString<'gc>,
+        bit: u16,
+    ) -> bool {
+        use crate::avm1::property_map::{handler_epoch, rajit_enabled};
+        if !rajit_enabled() {
+            return false;
+        }
+        let epoch = handler_epoch();
+        let ptr = object.as_ptr() as usize;
+        let (cached_epoch, mask, cached_ptr) = self.0.handler_cache.get();
+        let valid = cached_epoch == epoch && cached_ptr == ptr;
+        if valid && mask & bit != 0 {
+            return true;
+        }
+        let case_sensitive = crate::avm1::Avm1::is_case_sensitive(self.swf_version());
+        if !object.definitely_lacks_handler(name, case_sensitive) {
+            return false;
+        }
+        let mask = if valid { mask | bit } else { bit };
+        self.0.handler_cache.set((epoch, mask, ptr));
+        true
+    }
+
     pub fn downgrade(self) -> MovieClipWeak<'gc> {
         MovieClipWeak(Gc::downgrade(self.0))
     }
@@ -2973,12 +3007,19 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
             if self.should_fire_event_handlers(context, event)
                 && let Some(name) = event.method_name(&context.strings)
             {
+                let bit = clip_event_handler_bit(event);
                 context.action_queue.queue_action(
                     self.into(),
-                    ActionType::Method {
-                        object,
-                        name,
-                        args: vec![],
+                    if bit != 0 {
+                        // Same as `Method`, but lets the executor skip the call when the clip
+                        // provably has no such handler (checked at execution time, not now).
+                        ActionType::ClipEventMethod { object, name, bit }
+                    } else {
+                        ActionType::Method {
+                            object,
+                            name,
+                            args: vec![],
+                        }
                     },
                     event == ClipEvent::Unload,
                 );
@@ -5105,5 +5146,27 @@ impl ClipEventHandler {
             key_code,
             action_data: SwfSlice::from(movie).to_subslice(swf_action.action_data),
         }
+    }
+}
+
+/// rAJIT: a distinct bit for every clip event that has a method handler (`onEnterFrame`...).
+fn clip_event_handler_bit(event: ClipEvent) -> u16 {
+    match event {
+        ClipEvent::EnterFrame => 1 << 0,
+        ClipEvent::Load => 1 << 1,
+        ClipEvent::Unload => 1 << 2,
+        ClipEvent::MouseDown => 1 << 3,
+        ClipEvent::MouseMove => 1 << 4,
+        ClipEvent::MouseUp => 1 << 5,
+        ClipEvent::KeyDown => 1 << 6,
+        ClipEvent::KeyUp => 1 << 7,
+        ClipEvent::Press { .. } => 1 << 8,
+        ClipEvent::Release { .. } => 1 << 9,
+        ClipEvent::ReleaseOutside => 1 << 10,
+        ClipEvent::RollOver { .. } => 1 << 11,
+        ClipEvent::RollOut { .. } => 1 << 12,
+        ClipEvent::DragOver { .. } => 1 << 13,
+        ClipEvent::DragOut { .. } => 1 << 14,
+        _ => 0,
     }
 }

@@ -2233,6 +2233,18 @@ impl Player {
                     Avm1::run_stack_frame_for_method(action.clip, object, name, &args, context);
                 }
 
+                // Like `Method`, but skipped if the clip provably has no such handler.
+                ActionType::ClipEventMethod { object, name, bit } => {
+                    let skip = action.clip.as_movie_clip().is_some_and(|clip| {
+                        clip.object1()
+                            .is_some_and(|o| crate::avm1::Object::ptr_eq(o, object))
+                            && clip.avm1_handler_known_absent(object, name, bit)
+                    });
+                    if !skip {
+                        Avm1::run_stack_frame_for_method(action.clip, object, name, &[], context);
+                    }
+                }
+
                 // Event handler method call (e.g. onEnterFrame).
                 ActionType::NotifyListeners {
                     listener,

@@ -632,6 +632,10 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     fn set_name(this: &Write<Self>, name: AvmString<'gc>) {
+        if crate::avm1::property_map::is_handler_like_name(&name) {
+            // A child clip named like an event handler is found by AVM1 property lookups.
+            crate::avm1::property_map::bump_handler_epoch();
+        }
         unlock!(this, Self, name).set(Some(name));
     }
 

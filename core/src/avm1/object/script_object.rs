@@ -740,6 +740,52 @@ impl<'gc> Object<'gc> {
         self.get_data(istr!("prototype"), activation)
     }
 
+    /// rAJIT: returns `true` only if looking `name` up through this object's prototype chain
+    /// provably finds nothing, without running any code. It mirrors what `call_method` with
+    /// `ExecutionReason::Special` (which skips `__resolve`) would examine per object: a stored
+    /// property or getter of that name (any presence at all makes this return `false`, so SWF
+    /// version attributes need no special handling), a same-named child clip for display-object
+    /// backed objects, and then the `__proto__` link. Anything unusual returns `false`, which
+    /// simply means "take the normal path".
+    pub fn definitely_lacks_handler(self, name: AvmString<'gc>, case_sensitive: bool) -> bool {
+        use crate::display_object::{TDisplayObject, TDisplayObjectContainer};
+
+        // Names starting with `_` can hit display-object magic properties (`_x`, `_root`...).
+        if name.starts_with(b'_') {
+            return false;
+        }
+
+        let proto_key = crate::string::WStr::from_units(b"__proto__");
+        let mut current = self;
+        // `search_prototype` errors out at depth 255; just refuse to handle long chains.
+        for _ in 0..64 {
+            let next = {
+                let read = current.0.borrow();
+                if matches!(read.native, NativeObject::Super(_)) {
+                    return false;
+                }
+                if read.properties.contains_key(name, case_sensitive) {
+                    return false;
+                }
+                if let Some(dobj) = read.native.as_display_object()
+                    && let Some(container) = dobj.as_container()
+                    && container.child_by_name(&name, case_sensitive).is_some()
+                {
+                    return false;
+                }
+                read.properties
+                    .get(proto_key, case_sensitive)
+                    .map(|property| property.data())
+            };
+            match next {
+                Some(Value::Object(proto)) => current = proto,
+                // Not an object (or missing): the chain ends here with nothing found.
+                _ => return true,
+            }
+        }
+        false
+    }
+
     /// Checks if the object has a given named property.
     pub fn has_property(self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
         let dobj = match self.native_no_super() {

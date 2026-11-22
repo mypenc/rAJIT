@@ -84,6 +84,7 @@ def build(path, cols, rows, tile_px, dx, dy, frames_hint=2):
     open(path, "wb").write(b"FWS" + bytes([6]) + struct.pack("<I", 8 + len(body)) + body)
     print(path, cols * rows, "tiles")
 
-A = "tests/rajit_bench_assets"
-build(f"{A}/tiles_visible.swf", 40, 30, 12, 1, 1)   # 1200 tiles, all on screen (no culling possible)
-build(f"{A}/tiles_scroll.swf", 40, 30, 32, 2, 1)    # 1200 tiles in a 1280x960 world, most off screen
+if __name__ == "__main__":
+  A = "tests/rajit_bench_assets"
+  build(f"{A}/tiles_visible.swf", 40, 30, 12, 1, 1)   # 1200 tiles, all on screen (no culling possible)
+  build(f"{A}/tiles_scroll.swf", 40, 30, 32, 2, 1)    # 1200 tiles in a 1280x960 world, most off screen

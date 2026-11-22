@@ -21,7 +21,7 @@ mod object;
 mod object_reference;
 mod parameters;
 mod property;
-mod property_map;
+pub(crate) mod property_map;
 mod runtime;
 mod scope;
 mod value;

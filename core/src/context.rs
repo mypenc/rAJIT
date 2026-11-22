@@ -683,6 +683,14 @@ pub enum ActionType<'gc> {
         args: Vec<Avm1Value<'gc>>,
     },
 
+    /// An event handler method on a movie clip (e.g. `onEnterFrame`) that is skipped, at
+    /// execution time, if the clip provably has no such handler. `bit` identifies the event.
+    ClipEventMethod {
+        object: Avm1Object<'gc>,
+        name: AvmString<'gc>,
+        bit: u16,
+    },
+
     /// A system listener method.
     NotifyListeners {
         listener: AvmString<'gc>,
@@ -727,6 +735,12 @@ impl fmt::Debug for ActionType<'_> {
                 .field("object", object)
                 .field("name", name)
                 .field("args", args)
+                .finish(),
+            ActionType::ClipEventMethod { object, name, bit } => f
+                .debug_struct("ActionType::ClipEventMethod")
+                .field("object", object)
+                .field("name", name)
+                .field("bit", bit)
                 .finish(),
             ActionType::NotifyListeners {
                 listener,

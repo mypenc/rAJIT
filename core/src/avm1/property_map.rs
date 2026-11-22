@@ -9,13 +9,64 @@ use fnv::FnvBuildHasher;
 use gc_arena::Collect;
 use indexmap::{Equivalent, IndexMap};
 use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 type FnvIndexMap<K, V> = IndexMap<K, V, FnvBuildHasher>;
 
+// ---- rAJIT: event-handler lookup cache support ---------------------------------------------
+//
+// Clips are asked to run `onEnterFrame` & co. every frame, which costs a prototype-chain walk even
+// when nothing defines the handler. Clips can cache "no handler found" as long as nothing that
+// could make a handler *appear* has happened since. That can only be: a property whose name looks
+// like a handler (`on...`) being added to any object, a prototype being attached/changed on an
+// object that already has properties, or a child clip getting an `on...` instance name. Every one of
+// those bumps this epoch; a cached negative result is only valid for the epoch it was computed in.
+static HANDLER_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+#[inline(always)]
+pub fn handler_epoch() -> u64 {
+    HANDLER_EPOCH.load(Ordering::Relaxed)
+}
+
+#[inline(always)]
+pub fn bump_handler_epoch() {
+    HANDLER_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// `RAJIT_DISABLE=1` turns all rAJIT optimizations off (used for A/B testing against stock behaviour).
+pub fn rajit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RAJIT_DISABLE").is_none())
+}
+
+/// Whether a name starts with `on`, in any case. All event-handler method names do.
+#[inline]
+pub fn is_handler_like_name(name: &WStr) -> bool {
+    match name.units() {
+        Units::Bytes(b) => b.len() >= 2 && (b[0] | 0x20) == b'o' && (b[1] | 0x20) == b'n',
+        Units::Wide(w) => w.len() >= 2 && (w[0] | 0x20) == u16::from(b'o') && (w[1] | 0x20) == u16::from(b'n'),
+    }
+}
+
+#[inline]
+fn is_proto_name(name: &WStr) -> bool {
+    name.len() == 9 && name.eq_ignore_case(WStr::from_units(b"__proto__"))
+}
+
 /// A map from property names to values.
-#[derive(Default, Clone, Debug, Collect)]
+#[derive(Default, Debug, Collect)]
 #[collect(no_drop)]
 pub struct PropertyMap<'gc, V>(FnvIndexMap<PropertyName<'gc>, V>);
+
+impl<V: Clone> Clone for PropertyMap<'_, V> {
+    fn clone(&self) -> Self {
+        // A clone can carry handler-like keys or prototypes into a new object without
+        // going through `insert`, so be conservative.
+        bump_handler_epoch();
+        Self(self.0.clone())
+    }
+}
 
 impl<'gc, V> PropertyMap<'gc, V> {
     pub fn new() -> Self {
@@ -72,6 +123,9 @@ impl<'gc, V> PropertyMap<'gc, V> {
 
     /// Gets a mutable reference to the value for the specified property.
     pub fn get_mut<T: AsRef<WStr>>(&mut self, key: T, case_sensitive: bool) -> Option<&mut V> {
+        if is_proto_name(key.as_ref()) {
+            bump_handler_epoch(); // possibly re-routes a prototype chain
+        }
         if case_sensitive {
             self.0.get_mut(&CaseSensitive(key.as_ref()))
         } else {
@@ -101,6 +155,7 @@ impl<'gc, V> PropertyMap<'gc, V> {
 
     /// Returns the key-value tuples in Flash's iteration order (most recently added first).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (AvmString<'gc>, &mut V)> {
+        bump_handler_epoch();
         self.0.iter_mut().rev().map(|(k, v)| (k.0, v))
     }
 
@@ -134,11 +189,20 @@ impl<'gc, V> OccupiedEntry<'gc, '_, V> {
         self.map.get_index(self.index).unwrap().1
     }
 
+    fn note_modified(&self) {
+        let key = self.map.get_index(self.index).unwrap().0;
+        if is_proto_name(key.0.as_ref()) {
+            bump_handler_epoch(); // possibly re-routes a prototype chain
+        }
+    }
+
     pub fn get_mut(&mut self) -> &mut V {
+        self.note_modified();
         self.map.get_index_mut(self.index).unwrap().1
     }
 
     pub fn insert(self, value: V) -> V {
+        self.note_modified();
         std::mem::replace(self.map.get_index_mut(self.index).unwrap().1, value)
     }
 }
@@ -150,6 +214,12 @@ pub struct VacantEntry<'gc, 'a, V> {
 
 impl<V> VacantEntry<'_, '_, V> {
     pub fn insert(self, value: V) {
+        let key: &WStr = self.key.as_ref();
+        // Object creation inserts `__proto__` as the very first key of an empty map; that can't
+        // change what any existing clip sees, so it must not invalidate anything.
+        if is_handler_like_name(key) || (is_proto_name(key) && !self.map.is_empty()) {
+            bump_handler_epoch();
+        }
         self.map.insert(PropertyName(self.key), value);
     }
 }
