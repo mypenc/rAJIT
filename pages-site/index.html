@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>rAJIT test bench</title>
+<style>
+  :root { color-scheme: dark; --bg:#14171c; --panel:#1c2027; --line:#2c323c; --fg:#e6e8eb; --dim:#8b93a0; --acc:#5aa9ff; --bad:#ff6b6b; --ok:#5fd38d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:14px; padding:14px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:14px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px; }
+  #drop { border:2px dashed var(--line); border-radius:8px; padding:22px 10px; text-align:center; color:var(--dim); cursor:pointer; }
+  #drop.over { border-color:var(--acc); color:var(--fg); background:#1a2330; }
+  button, select { background:#262c36; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button.primary { background:var(--acc); color:#06121f; border-color:var(--acc); font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  #files { max-height:190px; overflow:auto; font:12px ui-monospace,monospace; }
+  #files div { display:flex; justify-content:space-between; gap:8px; padding:1px 0; }
+  #files span:last-child { color:var(--dim); white-space:nowrap; }
+  #stage { background:#000; border:1px solid var(--line); border-radius:8px; min-height:420px; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  #stage ruffle-player { width:100%; height:78vh; }
+  #hint { color:var(--dim); }
+  #log { font:12px ui-monospace,monospace; max-height:220px; overflow:auto; white-space:pre-wrap; }
+  .l404 { color:var(--bad); } .l200 { color:var(--ok); }
+  #meter { font:12px ui-monospace,monospace; color:var(--dim); }
+  #meter b { color:var(--fg); }
+  label { display:inline-flex; gap:5px; align-items:center; color:var(--dim); }
+  .seg a { padding:5px 10px; border:1px solid var(--line); color:var(--dim); text-decoration:none; }
+  .seg a:first-child { border-radius:6px 0 0 6px; } .seg a:last-child { border-radius:0 6px 6px 0; border-left:0; }
+  .seg a.on { background:var(--acc); color:#06121f; border-color:var(--acc); font-weight:600; }
+  small { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1>rAJIT test bench</h1>
+  <span class="seg" id="engines">
+    <a id="eng-rajit" href="?engine=rajit" title="Ruffle with the rAJIT optimizations">rAJIT</a><a id="eng-stock" href="?engine=stock" title="Unmodified upstream Ruffle, same version it was forked from">Stock Ruffle</a>
+  </span>
+  <span id="meter">page frames: <b id="m-fps">–</b> fps · avg <b id="m-avg">–</b> ms · worst <b id="m-max">–</b> ms</span>
+  <label><input type="checkbox" id="debug"> verbose Ruffle log</label>
+</header>
+<main>
+  <div>
+    <div class="panel">
+      <h2>1 · Drop your files</h2>
+      <div id="drop">Drop the SWF <b>and</b> any other files it loads (data, images, sounds…)<br>or a whole folder here — or click to choose</div>
+      <input id="fileInput" type="file" multiple hidden>
+      <div class="row">
+        <button id="pickFolder">Choose a folder…</button>
+        <button id="clear">Clear files</button>
+      </div>
+      <input id="folderInput" type="file" webkitdirectory hidden>
+    </div>
+    <div class="panel">
+      <h2>2 · Virtual folder</h2>
+      <div id="files"><small>No files yet.</small></div>
+      <div class="row"><label>Run: <select id="swfSelect"></select></label>
+        <button class="primary" id="run" disabled>Run</button></div>
+      <small>Files are served as if they sat next to the SWF. Names are matched case-insensitively and <code>?cache-busters</code> are ignored.</small>
+    </div>
+    <div class="panel">
+      <h2>What the SWF requested</h2>
+      <div id="log"><small>Nothing yet.</small></div>
+    </div>
+  </div>
+  <div>
+    <div id="stage"><span id="hint">Your game appears here.</span></div>
+    <p><small>Everything runs locally in your browser; dropped files never leave your machine.</small></p>
+  </div>
+</main>
+
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+const engine = params.get("engine") === "stock" ? "stock" : "rajit";
+document.getElementById("eng-" + engine).classList.add("on");
+document.getElementById("debug").checked = params.has("debug");
+document.getElementById("debug").addEventListener("change", (e) => {
+  const p = new URLSearchParams(location.search);
+  e.target.checked ? p.set("debug", "1") : p.delete("debug");
+  location.search = p.toString();
+});
+for (const a of document.querySelectorAll("#engines a")) {      // keep ?debug when switching engine
+  const p = new URLSearchParams(location.search); p.set("engine", a.id.replace("eng-", ""));
+  a.href = "?" + p.toString();
+}
+
+// ---- Ruffle (loaded for the chosen engine) ----
+window.RufflePlayer = window.RufflePlayer || {};
+window.RufflePlayer.config = {
+  autoplay: "on", unmuteOverlay: "hidden", splashScreen: false, letterbox: "on",
+  logLevel: params.has("debug") ? "info" : "warn", contextMenu: "on",
+};
+const rs = document.createElement("script");
+rs.src = "./ruffle-" + engine + "/ruffle.js";
+rs.onerror = () => { document.getElementById("hint").textContent = "Could not load the " + engine + " engine."; };
+document.head.appendChild(rs);
+
+// ---- virtual folder (Cache API + service worker) ----
+const CACHE = "rajit-vfs-v1";
+const vfsBase = new URL("./__vfs__/game/", location.href);
+const vfsUrl = (path) => new URL(path.split("/").map(encodeURIComponent).join("/"), vfsBase).href;
+const MIME = { swf:"application/x-shockwave-flash", txt:"text/plain", xml:"text/xml", json:"application/json",
+  png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif", mp3:"audio/mpeg", flv:"video/x-flv",
+  css:"text/css", html:"text/html", js:"text/javascript", csv:"text/csv", wav:"audio/wav", ogg:"audio/ogg" };
+const mimeOf = (path, file) => file.type || MIME[path.split(".").pop().toLowerCase()] || "application/octet-stream";
+const fmt = (n) => n > 1048576 ? (n/1048576).toFixed(1)+" MB" : n > 1024 ? (n/1024).toFixed(1)+" KB" : n+" B";
+const esc = (s) => s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+let entries = [];          // {path, size}
+
+async function refreshList() {
+  const cache = await caches.open(CACHE);
+  entries = [];
+  for (const req of await cache.keys()) {
+    const res = await cache.match(req);
+    const path = decodeURIComponent(new URL(req.url).pathname.split("/__vfs__/game/")[1] || "");
+    entries.push({ path, size: Number(res.headers.get("X-Size") || 0) });
+  }
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  const box = document.getElementById("files");
+  box.innerHTML = entries.length
+    ? entries.map((e) => `<div><span>${esc(e.path)}</span><span>${fmt(e.size)}</span></div>`).join("")
+    : "<small>No files yet.</small>";
+  const swfs = entries.filter((e) => /\.swf$/i.test(e.path));
+  const sel = document.getElementById("swfSelect");
+  const prev = sel.value;
+  sel.innerHTML = swfs.map((e) => `<option value="${esc(e.path)}">${esc(e.path)}</option>`).join("");
+  if (swfs.some((e) => e.path === prev)) sel.value = prev;
+  document.getElementById("run").disabled = swfs.length === 0 || !ready;
+}
+
+async function store(items) {          // items: [{path, file}]
+  const cache = await caches.open(CACHE);
+  for (const { path, file } of items) {
+    await cache.put(new Request(vfsUrl(path)), new Response(file, {
+      headers: { "Content-Type": mimeOf(path, file), "X-Size": String(file.size) },
+    }));
+  }
+  await refreshList();
+}
+
+async function clearFiles() { await caches.delete(CACHE); await refreshList(); }
+
+async function walk(entry, prefix, out) {
+  if (entry.isFile) {
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    out.push({ path: prefix + entry.name, file });
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    let batch;
+    do {
+      batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      for (const e of batch) await walk(e, prefix + entry.name + "/", out);
+    } while (batch.length);
+  }
+}
+
+async function itemsFromDrop(dt) {
+  const out = [];
+  const entries_ = [...dt.items].filter((i) => i.kind === "file").map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry());
+  if (entries_.every(Boolean) && entries_.length) { for (const e of entries_) await walk(e, "", out); }
+  else for (const f of dt.files) out.push({ path: f.name, file: f });
+  return out;
+}
+
+const itemsFromInput = (input) => [...input.files].map((f) => ({ path: f.webkitRelativePath || f.name, file: f }));
+
+const drop = document.getElementById("drop");
+drop.addEventListener("click", () => document.getElementById("fileInput").click());
+for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); });
+for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); });
+drop.addEventListener("drop", async (e) => store(await itemsFromDrop(e.dataTransfer)));
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => e.preventDefault());
+document.getElementById("fileInput").addEventListener("change", (e) => { store(itemsFromInput(e.target)); e.target.value = ""; });
+document.getElementById("pickFolder").addEventListener("click", () => document.getElementById("folderInput").click());
+document.getElementById("folderInput").addEventListener("change", (e) => { store(itemsFromInput(e.target)); e.target.value = ""; });
+document.getElementById("clear").addEventListener("click", clearFiles);
+
+// ---- request log from the service worker ----
+const log = document.getElementById("log");
+let logged = 0;
+new BroadcastChannel("rajit-vfs").onmessage = (e) => {
+  if (e.data.type !== "request") return;
+  if (!logged++) log.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "l" + e.data.status;
+  d.textContent = `${e.data.status}  ${e.data.method}  ${e.data.path}`;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+};
+
+// ---- service worker ----
+let ready = false;
+(async () => {
+  if (!("serviceWorker" in navigator)) { document.getElementById("hint").textContent = "This browser has no service workers, so extra files can't be served."; return; }
+  await navigator.serviceWorker.register("./sw.js", { scope: "./" });
+  await navigator.serviceWorker.ready;
+  if (!navigator.serviceWorker.controller) {
+    await new Promise((res) => navigator.serviceWorker.addEventListener("controllerchange", res, { once: true }));
+  }
+  ready = true;
+  window.__vfsReady = true;
+  await refreshList();
+})();
+
+// ---- run ----
+document.getElementById("run").addEventListener("click", async () => {
+  const path = document.getElementById("swfSelect").value;
+  if (!path) return;
+  if (!window.RufflePlayer || !window.RufflePlayer.newest) { document.getElementById("hint").textContent = "Ruffle is still loading…"; return; }
+  logged = 0; log.innerHTML = "<small>Nothing yet.</small>";
+  const stage = document.getElementById("stage");
+  stage.innerHTML = "";
+  const player = window.RufflePlayer.newest().createPlayer();
+  stage.appendChild(player);
+  window.__player = player;
+  // Relative URLs inside the SWF must resolve against the SWF's own folder in the virtual folder.
+  const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+  player.load({ url: vfsUrl(path), base: new URL(dir.split("/").map(encodeURIComponent).join("/"), vfsBase).href });
+});
+
+// ---- page frame meter: main-thread stalls show up as long frames ----
+(() => {
+  let last = performance.now(), acc = 0, n = 0, worst = 0, since = last;
+  const fps = document.getElementById("m-fps"), avg = document.getElementById("m-avg"), max = document.getElementById("m-max");
+  function tick(t) {
+    const dt = t - last; last = t; acc += dt; n++; worst = Math.max(worst, dt);
+    if (t - since >= 1000) {
+      fps.textContent = Math.round(n * 1000 / (t - since)); avg.textContent = (acc / n).toFixed(1); max.textContent = worst.toFixed(0);
+      acc = 0; n = 0; worst = 0; since = t;
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

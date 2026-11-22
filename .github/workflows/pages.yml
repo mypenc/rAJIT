@@ -1,0 +1,121 @@
+name: Build web and deploy to Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-web:
+    name: Build ${{ matrix.variant }} (wasm)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [rajit, stock]
+    steps:
+      # "stock" is untouched upstream Ruffle at the commit rAJIT was forked from, for A/B comparison.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.variant == 'stock' && 'ruffle-rs/ruffle' || github.repository }}
+          ref: ${{ matrix.variant == 'stock' && '0ddd12b6adf211f556a375e96fca70095de5835b' || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-${{ matrix.variant }}
+
+      # Must match the wasm-bindgen crate version in Cargo.lock.
+      - name: Install wasm-bindgen
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.127
+
+      - name: Install wasm-opt
+        uses: sigoden/install-binary@v1
+        with:
+          repo: WebAssembly/binaryen
+          tag: version_129
+          name: wasm-opt
+
+      - name: Build wasm and the self-hosted bundle
+        working-directory: web
+        run: |
+          npm ci
+          npm run build --workspace=ruffle-core
+          npm run build --workspace=ruffle-selfhosted
+
+      - name: Show output
+        run: ls -la web/packages/selfhosted/dist | head -30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ matrix.variant }}
+          path: web/packages/selfhosted/dist
+          if-no-files-found: error
+
+  smoke:
+    name: Browser smoke test (virtual folder)
+    needs: build-web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: bash .github/scripts/assemble_site.sh artifacts _site
+      - run: python3 tools/rajit/gen_vfs_smoke.py /tmp/smoke
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install Playwright
+        working-directory: pages-site-test
+        run: |
+          npm init -y >/dev/null
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Serve and test
+        run: |
+          python3 -m http.server 8080 --directory _site >/tmp/server.log 2>&1 &
+          sleep 2
+          cd pages-site-test && node smoke.mjs http://127.0.0.1:8080 /tmp/smoke 2>&1 | tee /tmp/smoke.out
+          code=${PIPESTATUS[0]}
+          echo "::notice title=smoke test::$(awk '{printf "%s%%0A", $0}' /tmp/smoke.out | cut -c1-3000)"
+          exit $code
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: [build-web, smoke]
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: bash .github/scripts/assemble_site.sh artifacts _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
