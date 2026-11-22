@@ -7,22 +7,26 @@ use ruffle_core::tag_utils::movie_from_path;
 use ruffle_core::PlayerBuilder;
 use std::time::{Duration, Instant};
 
-fn bench(name: &str, path: &str, frames: u32) {
-    // Sanity check with Ruffle's own SWF reader: the world sprite must hold 1200 placed tiles.
+fn bench(name: &str, path: &str, frames: u32, expect: &[(u16, usize)]) {
+    // Sanity check with Ruffle's own SWF reader: each layer sprite must hold the expected tiles.
     let data = std::fs::read(path).expect("read swf");
     let buf = swf::decompress_swf(&data[..]).expect("decompress");
     let parsed = swf::parse_swf(&buf).expect("parse");
-    let tiles = parsed
-        .tags
-        .iter()
-        .find_map(|t| match t {
-            Tag::DefineSprite(sprite) if sprite.id == 3 => Some(
-                sprite.tags.iter().filter(|t| matches!(t, Tag::PlaceObject(_))).count(),
-            ),
-            _ => None,
-        })
-        .expect("world sprite");
-    assert_eq!(tiles, 1200, "{name}: unexpected tile count");
+    let mut tiles = 0;
+    for &(id, count) in expect {
+        let placed = parsed
+            .tags
+            .iter()
+            .find_map(|t| match t {
+                Tag::DefineSprite(sprite) if sprite.id == id => Some(
+                    sprite.tags.iter().filter(|t| matches!(t, Tag::PlaceObject(_))).count(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: sprite {id} missing"));
+        assert_eq!(placed, count, "{name}: unexpected tile count in sprite {id}");
+        tiles += placed;
+    }
 
     let movie = movie_from_path(path, None).expect("load swf");
     let player = PlayerBuilder::new()
@@ -56,11 +60,23 @@ fn bench(name: &str, path: &str, frames: u32) {
 #[test]
 #[ignore]
 fn tiles_visible() {
-    bench("tiles_visible", "rajit_bench_assets/tiles_visible.swf", 400);
+    bench("tiles_visible", "rajit_bench_assets/tiles_visible.swf", 400, &[(3, 1200)]);
 }
 
 #[test]
 #[ignore]
 fn tiles_scroll() {
-    bench("tiles_scroll", "rajit_bench_assets/tiles_scroll.swf", 400);
+    bench("tiles_scroll", "rajit_bench_assets/tiles_scroll.swf", 400, &[(3, 1200)]);
+}
+
+#[test]
+#[ignore]
+fn layers_cached() {
+    bench("layers_cached", "rajit_bench_assets/layers_cached.swf", 400, &[(3, 3000), (4, 1500), (5, 300)]);
+}
+
+#[test]
+#[ignore]
+fn layers_plain() {
+    bench("layers_plain", "rajit_bench_assets/layers_plain.swf", 400, &[(3, 3000), (4, 1500), (5, 300)]);
 }

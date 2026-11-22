@@ -84,7 +84,45 @@ def build(path, cols, rows, tile_px, dx, dy, frames_hint=2):
     open(path, "wb").write(b"FWS" + bytes([6]) + struct.pack("<I", 8 + len(body)) + body)
     print(path, cols * rows, "tiles")
 
+def scroll_layers(names, dx, dy):
+    def step(name, prop, delta):
+        return (push(p_str(name), p_int(prop)) + push(p_str(name), p_int(prop)) + act(0x22)
+                + push(p_int(delta)) + act(0x0B) + act(0x23))
+    return b"".join(step(n, 0, dx) + step(n, 1, dy) for n in names)
+
+def build_layers(path, cache, version=8):
+    """Generic layered tile scene: a large static layer, an overlay layer and a small 'active' layer,
+    all scrolled together every frame. With cache=True the two big layers use cacheAsBitmap."""
+    T = 30
+    out = define_rect_shape(1, T, (90, 130, 90)) + sprite(2, place(1, char=1))
+    def grid(cols, rows, keep=lambda c, r: True):
+        pl, d = b"", 1
+        for r in range(rows):
+            for c in range(cols):
+                if keep(c, r):
+                    pl += place(d, char=2, mat=matrix_translate(c * T * 20, r * T * 20)); d += 1
+        return pl
+    out += sprite(3, grid(100, 30))                                         # "still": 3000 tiles
+    out += sprite(4, grid(50, 30))                                          # "shadow": 1500 tiles
+    out += sprite(5, grid(100, 30, lambda c, r: (c * 7 + r * 13) % 10 == 0))  # "active": 300 tiles
+    out += place(1, char=3, name="still") + place(2, char=4, name="shadow") + place(3, char=5, name="active")
+    flags = b""
+    if cache:
+        for n in ("still", "shadow"):
+            flags += push(p_str("_root." + n)) + act(0x1C) + push(p_str("cacheAsBitmap"), b"\x05\x01") + act(0x4F)
+    out += (tag(12, flags + b"\x00") if flags else b"") + tag(1)               # frame 1: enable caching once
+    out += tag(12, scroll_layers(["still", "shadow", "active"], 2, 1) + b"\x00") + tag(1)   # frame 2: scroll
+    out += tag(12, act(0x81, struct.pack("<H", 1)) + act(0x06) + b"\x00") + tag(1)          # frame 3: back to frame 2
+    out += tag(0)
+    hdr = bytes([0x78, 0x00, 0x05, 0x5F, 0x00, 0x00, 0x0F, 0xA0, 0x00]) + struct.pack("<HH", 30 << 8, 3)
+    body = hdr + out
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "wb").write(b"FWS" + bytes([version]) + struct.pack("<I", 8 + len(body)) + body)
+    print(path, "cache" if cache else "no cache")
+
 if __name__ == "__main__":
   A = "tests/rajit_bench_assets"
   build(f"{A}/tiles_visible.swf", 40, 30, 12, 1, 1)   # 1200 tiles, all on screen (no culling possible)
   build(f"{A}/tiles_scroll.swf", 40, 30, 32, 2, 1)    # 1200 tiles in a 1280x960 world, most off screen
+  build_layers(f"{A}/layers_cached.swf", True)
+  build_layers(f"{A}/layers_plain.swf", False)
