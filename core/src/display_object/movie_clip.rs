@@ -279,6 +279,29 @@ impl<'gc> MovieClipData<'gc> {
 }
 
 impl<'gc> MovieClip<'gc> {
+    /// rAJIT: whether this clip's AVM1 object is known (from an earlier check, still valid for the
+    /// current handler epoch) to have no property for the handler(s) identified by `bit`.
+    #[inline]
+    fn handler_cache_hit(self, object: Avm1Object<'gc>, bit: u16) -> bool {
+        let (epoch, mask, ptr) = self.0.handler_cache.get();
+        epoch == crate::avm1::property_map::handler_epoch()
+            && ptr == object.as_ptr() as usize
+            && mask & bit != 0
+    }
+
+    /// rAJIT: remembers that the check made at `epoch` found no handler for `bit`.
+    #[inline]
+    fn handler_cache_store(self, object: Avm1Object<'gc>, epoch: u64, bit: u16) {
+        let ptr = object.as_ptr() as usize;
+        let (cached_epoch, mask, cached_ptr) = self.0.handler_cache.get();
+        let mask = if cached_epoch == epoch && cached_ptr == ptr {
+            mask | bit
+        } else {
+            bit
+        };
+        self.0.handler_cache.set((epoch, mask, ptr));
+    }
+
     /// rAJIT: `true` if this clip's AVM1 object provably has no handler named `name` (one of the
     /// clip event methods, identified by `bit`), so queueing/running it can be skipped.
     /// Cached per clip until anything that could introduce a handler happens.
@@ -292,19 +315,15 @@ impl<'gc> MovieClip<'gc> {
         if !rajit_enabled() {
             return false;
         }
-        let epoch = handler_epoch();
-        let ptr = object.as_ptr() as usize;
-        let (cached_epoch, mask, cached_ptr) = self.0.handler_cache.get();
-        let valid = cached_epoch == epoch && cached_ptr == ptr;
-        if valid && mask & bit != 0 {
+        if self.handler_cache_hit(object, bit) {
             return true;
         }
+        let epoch = handler_epoch();
         let case_sensitive = crate::avm1::Avm1::is_case_sensitive(self.swf_version());
         if !object.definitely_lacks_handler(name, case_sensitive) {
             return false;
         }
-        let mask = if valid { mask | bit } else { bit };
-        self.0.handler_cache.set((epoch, mask, ptr));
+        self.handler_cache_store(object, epoch, bit);
         true
     }
 
@@ -2357,19 +2376,31 @@ impl<'gc> MovieClip<'gc> {
         } else if self.avm1_parent().is_none() {
             false
         } else if let Some(object) = self.0.object1.get() {
+            // rAJIT: this runs for every clip on every mouse pick. A clip with no button handler
+            // anywhere in its chain stays that way until the handler epoch changes, so remember it.
+            let cache_enabled = crate::avm1::property_map::rajit_enabled();
+            if cache_enabled && self.handler_cache_hit(object, BUTTON_HANDLERS_BIT) {
+                return false;
+            }
+            let epoch = crate::avm1::property_map::handler_epoch();
+
             let mut activation = Avm1Activation::from_nothing(
                 context,
                 ActivationIdentifier::root("[Mouse Pick]"),
                 self.avm1_root(),
             );
 
-            ClipEvent::BUTTON_EVENT_METHODS
+            let found = ClipEvent::BUTTON_EVENT_METHODS
                 .iter()
                 .copied()
                 .any(|handler| {
                     let handler = AvmString::new_utf8(activation.gc(), handler);
                     object.has_property(&mut activation, handler)
-                })
+                });
+            if cache_enabled && !found {
+                self.handler_cache_store(object, epoch, BUTTON_HANDLERS_BIT);
+            }
+            found
         } else {
             false
         }
@@ -5148,6 +5179,9 @@ impl ClipEventHandler {
         }
     }
 }
+
+/// rAJIT: cache bit meaning "no button-mode handler (`onPress`, `onRelease`, ...) anywhere in the chain".
+const BUTTON_HANDLERS_BIT: u16 = 1 << 15;
 
 /// rAJIT: a distinct bit for every clip event that has a method handler (`onEnterFrame`...).
 fn clip_event_handler_bit(event: ClipEvent) -> u16 {
